@@ -96,7 +96,9 @@
       });
     }
 
-    window.addEventListener("load", renderTurnstile);
+    // Calling immediately avoids missing the load event when this page is
+    // displayed in an already-loaded iframe or Android WebView.
+    renderTurnstile();
   </script>
 </body>
 </html>
