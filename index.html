@@ -1,28 +1,102 @@
 <!DOCTYPE html>
-<html>
+<html lang="ar">
 <head>
+  <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>تحقق أمني</title>
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <style>
-    body {
+    html, body {
       margin: 0;
+      min-height: 100%;
       display: flex;
       justify-content: center;
       align-items: center;
-      height: 100vh;
       background: transparent;
     }
   </style>
+  <script
+    src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
+    async
+    defer
+  ></script>
 </head>
 <body>
-  <div class="cf-turnstile"
-       data-sitekey="0x4AAAAAAEJp1NPibtOC8ok_"
-       data-callback="onSuccess"></div>
+  <div id="turnstile-container"></div>
   <script>
-    function onSuccess(token) {
-      TurnstileChannel.postMessage(token);
+    const allowedDashboardHost = (hostname) =>
+      hostname === "index-dashboard.pages.dev" ||
+      hostname.endsWith(".index-dashboard.pages.dev") ||
+      hostname === "localhost" ||
+      hostname === "127.0.0.1";
+
+    let widgetId = null;
+
+    function notifyHost(token) {
+      // Preserve the existing Android/iOS WebView bridge.
+      if (window.TurnstileChannel &&
+          typeof window.TurnstileChannel.postMessage === "function") {
+        window.TurnstileChannel.postMessage(token || "");
+        return;
+      }
+
+      if (window.parent === window || !document.referrer) return;
+
+      try {
+        const parentUrl = new URL(document.referrer);
+        if (!allowedDashboardHost(parentUrl.hostname)) return;
+        window.parent.postMessage(token || "", parentUrl.origin);
+      } catch (_) {
+        // Do not send tokens to an unknown parent origin.
+      }
     }
+
+    function onSuccess(token) {
+      notifyHost(token);
+    }
+
+    function onExpired() {
+      notifyHost("");
+    }
+
+    function onError() {
+      notifyHost("");
+    }
+
+    window.addEventListener("message", (event) => {
+      if (event.source !== window.parent || !document.referrer) return;
+
+      try {
+        const parentUrl = new URL(document.referrer);
+        if (event.origin !== parentUrl.origin ||
+            !allowedDashboardHost(parentUrl.hostname)) {
+          return;
+        }
+        if (event.data === "index-turnstile-reset" &&
+            widgetId !== null &&
+            window.turnstile) {
+          window.turnstile.reset(widgetId);
+          notifyHost("");
+        }
+      } catch (_) {
+        // Ignore messages from unexpected origins.
+      }
+    });
+
+    function renderTurnstile() {
+      if (!window.turnstile) {
+        window.setTimeout(renderTurnstile, 50);
+        return;
+      }
+
+      widgetId = window.turnstile.render("#turnstile-container", {
+        sitekey: "0x4AAAAAAEJp1NPibtOC8ok_",
+        callback: onSuccess,
+        "expired-callback": onExpired,
+        "error-callback": onError,
+      });
+    }
+
+    window.addEventListener("load", renderTurnstile);
   </script>
 </body>
-  </html>
+</html>
