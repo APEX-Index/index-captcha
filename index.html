@@ -26,8 +26,10 @@
   <script>
     const allowedDashboardHost = (hostname) =>
       hostname === "index-dashboard-1yf.pages.dev" ||
+      hostname.endsWith(".index-dashboard-1yf.pages.dev") ||
       hostname === "index-dashboard.pages.dev" ||
       hostname.endsWith(".index-dashboard.pages.dev") ||
+      hostname === "apex-index.github.io" ||
       hostname === "localhost" ||
       hostname === "127.0.0.1";
 
@@ -40,16 +42,42 @@
     let scriptReady = false;
     let scriptTimeoutId = null;
 
-    function getAllowedParentOrigin() {
-      if (window.parent === window || !document.referrer) return null;
+    function normalizeAllowedParentOrigin(value) {
+      if (!value) return null;
 
       try {
-        const parentUrl = new URL(document.referrer);
+        const parentUrl = new URL(value);
+        const isLocalHost =
+          parentUrl.hostname === "localhost" ||
+          parentUrl.hostname === "127.0.0.1";
+
+        if (parentUrl.username || parentUrl.password) return null;
         if (!allowedDashboardHost(parentUrl.hostname)) return null;
+        if (parentUrl.protocol !== "https:" &&
+            !(isLocalHost && parentUrl.protocol === "http:")) {
+          return null;
+        }
+
         return parentUrl.origin;
       } catch (_) {
         return null;
       }
+    }
+
+    function getAllowedParentOrigin() {
+      if (window.parent === window) return null;
+
+      // The dashboard supplies its own origin explicitly. This avoids
+      // depending on document.referrer, which can be omitted by browser
+      // privacy settings or intermediary policies.
+      const configuredOrigin =
+        new URLSearchParams(window.location.search).get("parentOrigin");
+      const allowedConfiguredOrigin =
+        normalizeAllowedParentOrigin(configuredOrigin);
+      if (allowedConfiguredOrigin) return allowedConfiguredOrigin;
+
+      // Keep compatibility with existing native/web integrations.
+      return normalizeAllowedParentOrigin(document.referrer);
     }
 
     function notifyParentStatus(status) {
@@ -147,11 +175,10 @@
     }
 
     window.addEventListener("message", (event) => {
-      if (event.source !== window.parent || !document.referrer) return;
+      if (event.source !== window.parent) return;
 
       const parentOrigin = getAllowedParentOrigin();
       if (!parentOrigin || event.origin !== parentOrigin) return;
-
       if (event.data !== "index-turnstile-reset") return;
 
       notifyHost("");
