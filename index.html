@@ -6,19 +6,20 @@
   <title>تحقق أمني</title>
   <style>
     html, body {
-      margin: 0;
+      width: 100%;
       min-height: 100%;
+      margin: 0;
       display: flex;
       justify-content: center;
       align-items: center;
       background: transparent;
     }
+
+    #turnstile-container {
+      max-width: 100%;
+      min-height: 65px;
+    }
   </style>
-  <script
-    src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
-    async
-    defer
-  ></script>
 </head>
 <body>
   <div id="turnstile-container"></div>
@@ -30,7 +31,32 @@
       hostname === "localhost" ||
       hostname === "127.0.0.1";
 
+    const siteKey = "0x4AAAAAAEJp1NPibtOC8ok_";
+    const statusPrefix = "index-turnstile:";
+    const maxAutomaticRetries = 2;
+
     let widgetId = null;
+    let retryCount = 0;
+    let scriptReady = false;
+    let scriptTimeoutId = null;
+
+    function getAllowedParentOrigin() {
+      if (window.parent === window || !document.referrer) return null;
+
+      try {
+        const parentUrl = new URL(document.referrer);
+        if (!allowedDashboardHost(parentUrl.hostname)) return null;
+        return parentUrl.origin;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function notifyParentStatus(status) {
+      const parentOrigin = getAllowedParentOrigin();
+      if (!parentOrigin) return;
+      window.parent.postMessage(statusPrefix + status, parentOrigin);
+    }
 
     function notifyHost(token) {
       // Preserve the existing Android/iOS WebView bridge.
@@ -40,66 +66,120 @@
         return;
       }
 
-      if (window.parent === window || !document.referrer) return;
-
-      try {
-        const parentUrl = new URL(document.referrer);
-        if (!allowedDashboardHost(parentUrl.hostname)) return;
-        window.parent.postMessage(token || "", parentUrl.origin);
-      } catch (_) {
-        // Do not send tokens to an unknown parent origin.
-      }
+      const parentOrigin = getAllowedParentOrigin();
+      if (!parentOrigin) return;
+      window.parent.postMessage(token || "", parentOrigin);
     }
 
     function onSuccess(token) {
+      retryCount = 0;
       notifyHost(token);
+      notifyParentStatus("verified");
     }
 
     function onExpired() {
       notifyHost("");
+      notifyParentStatus("expired");
     }
 
-    function onError() {
+    function onTimeout() {
       notifyHost("");
+      notifyParentStatus("timeout");
+    }
+
+    function onError(errorCode) {
+      notifyHost("");
+      retryCount += 1;
+
+      const code = String(errorCode || "unknown");
+      if (retryCount <= maxAutomaticRetries) {
+        notifyParentStatus("retrying:" + code);
+        // Let Turnstile perform its built-in retry for transient failures.
+        return false;
+      }
+
+      // Stop endless automatic retries and let the visitor retry explicitly.
+      notifyParentStatus("error:" + code);
+      return true;
+    }
+
+    function renderTurnstile() {
+      if (!window.turnstile) {
+        notifyParentStatus("error:api-unavailable");
+        return;
+      }
+
+      try {
+        widgetId = window.turnstile.render("#turnstile-container", {
+          sitekey: siteKey,
+          retry: "auto",
+          "retry-interval": 8000,
+          callback: onSuccess,
+          "expired-callback": onExpired,
+          "timeout-callback": onTimeout,
+          "error-callback": onError,
+        });
+        notifyParentStatus("ready");
+      } catch (_) {
+        notifyParentStatus("error:render-failed");
+      }
+    }
+
+    window.onIndexTurnstileLoad = function () {
+      scriptReady = true;
+      if (scriptTimeoutId !== null) {
+        window.clearTimeout(scriptTimeoutId);
+        scriptTimeoutId = null;
+      }
+      renderTurnstile();
+    };
+
+    function onScriptError() {
+      if (scriptTimeoutId !== null) {
+        window.clearTimeout(scriptTimeoutId);
+        scriptTimeoutId = null;
+      }
+      notifyParentStatus("error:script-load");
     }
 
     window.addEventListener("message", (event) => {
       if (event.source !== window.parent || !document.referrer) return;
 
-      try {
-        const parentUrl = new URL(document.referrer);
-        if (event.origin !== parentUrl.origin ||
-            !allowedDashboardHost(parentUrl.hostname)) {
-          return;
-        }
-        if (event.data === "index-turnstile-reset" &&
-            widgetId !== null &&
-            window.turnstile) {
-          window.turnstile.reset(widgetId);
-          notifyHost("");
-        }
-      } catch (_) {
-        // Ignore messages from unexpected origins.
-      }
-    });
+      const parentOrigin = getAllowedParentOrigin();
+      if (!parentOrigin || event.origin !== parentOrigin) return;
 
-    function renderTurnstile() {
-      if (!window.turnstile) {
-        window.setTimeout(renderTurnstile, 50);
+      if (event.data !== "index-turnstile-reset") return;
+
+      notifyHost("");
+      retryCount = 0;
+
+      if (window.turnstile && widgetId !== null) {
+        try {
+          window.turnstile.reset(widgetId);
+          notifyParentStatus("ready");
+        } catch (_) {
+          notifyParentStatus("error:reset-failed");
+        }
         return;
       }
 
-      widgetId = window.turnstile.render("#turnstile-container", {
-        sitekey: "0x4AAAAAAEJp1NPibtOC8ok_",
-        callback: onSuccess,
-        "expired-callback": onExpired,
-        "error-callback": onError,
-      });
-    }
+      // The API script failed to load; a fresh document load is required.
+      window.location.reload();
+    });
 
-    // Calling immediately avoids missing the load event when this page is
-    // displayed in an already-loaded iframe or Android WebView.
-    renderTurnstile();
+    notifyParentStatus("loading");
+
+    scriptTimeoutId = window.setTimeout(() => {
+      if (!scriptReady) onScriptError();
+    }, 15000);
+
+    const script = document.createElement("script");
+    script.src =
+      "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=onIndexTurnstileLoad";
+    script.async = true;
+    script.defer = true;
+    script.onerror = onScriptError;
+    document.head.appendChild(script);
   </script>
 </body>
 </html>
