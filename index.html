@@ -67,9 +67,8 @@
     function getAllowedParentOrigin() {
       if (window.parent === window) return null;
 
-      // The dashboard supplies its own origin explicitly. This avoids
-      // depending on document.referrer, which can be omitted by browser
-      // privacy settings or intermediary policies.
+      // Prefer the explicit origin supplied by the dashboard. This avoids
+      // depending on document.referrer, which privacy settings may omit.
       const configuredOrigin =
         new URLSearchParams(window.location.search).get("parentOrigin");
       const allowedConfiguredOrigin =
@@ -87,21 +86,29 @@
     }
 
     function notifyHost(token) {
-      // Preserve the existing Android/iOS WebView bridge.
+      // When embedded, the verified token belongs to the iframe host. Always
+      // deliver it there first, even if a native bridge is also injected into
+      // the frame. Otherwise the parent could receive "verified" status but
+      // never receive the token required by Supabase Auth.
+      const parentOrigin = getAllowedParentOrigin();
+      if (parentOrigin) {
+        window.parent.postMessage(token || "", parentOrigin);
+        return true;
+      }
+
+      // Preserve the existing Android/iOS bridge for top-level WebViews.
       if (window.TurnstileChannel &&
           typeof window.TurnstileChannel.postMessage === "function") {
         window.TurnstileChannel.postMessage(token || "");
-        return;
+        return true;
       }
 
-      const parentOrigin = getAllowedParentOrigin();
-      if (!parentOrigin) return;
-      window.parent.postMessage(token || "", parentOrigin);
+      return false;
     }
 
     function onSuccess(token) {
       retryCount = 0;
-      notifyHost(token);
+      if (!notifyHost(token)) return;
       notifyParentStatus("verified");
     }
 
